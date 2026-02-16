@@ -1,0 +1,149 @@
+#!/usr/bin/env node
+import chalk from "chalk";
+import { cancel, intro, isCancel, log, outro, password, select, text } from "@clack/prompts";
+import { loginWithBrowser } from "./auth.js";
+import { whoopApi } from "./api.js";
+import { AppConfig, clearToken, loadConfig, loadToken, saveConfig } from "./config.js";
+import { fmtDate, msToHours } from "./utils.js";
+
+async function setupConfig(): Promise<AppConfig> {
+  const clientId = await text({
+    message: "Whoop OAuth Client ID",
+    placeholder: "Paste from developer.whoop.com app settings"
+  });
+
+  if (isCancel(clientId)) throw new Error("Cancelled");
+
+  const clientSecret = await password({
+    message: "Whoop OAuth Client Secret (optional for PKCE clients)",
+    mask: "*"
+  });
+
+  if (isCancel(clientSecret)) throw new Error("Cancelled");
+
+  const redirectUri = await text({
+    message: "Redirect URI (must match your Whoop app)",
+    initialValue: "http://127.0.0.1:8787/callback"
+  });
+
+  if (isCancel(redirectUri)) throw new Error("Cancelled");
+
+  const config: AppConfig = {
+    clientId: String(clientId),
+    clientSecret: String(clientSecret || "") || undefined,
+    redirectUri: String(redirectUri),
+    scopes: ["read:profile", "read:sleep", "read:recovery", "read:cycles"]
+  };
+
+  saveConfig(config);
+  return config;
+}
+
+function printSleep(records: any[]) {
+  console.log(chalk.bold("\nRecent Sleep"));
+  for (const r of records) {
+    console.log(`• ${fmtDate(r.start)} → ${fmtDate(r.end)}`);
+    console.log(`  performance: ${r.score?.sleep_performance_percentage ?? "-"}% | efficiency: ${r.score?.sleep_efficiency_percentage ?? "-"}%`);
+    console.log(`  in bed: ${msToHours(r.score?.stage_summary?.total_in_bed_time_milli)} | awake: ${msToHours(r.score?.stage_summary?.total_awake_time_milli)} | disturbances: ${r.score?.stage_summary?.disturbance_count ?? "-"}`);
+  }
+}
+
+function printRecovery(records: any[]) {
+  console.log(chalk.bold("\nRecent Recovery"));
+  for (const r of records) {
+    console.log(`• ${fmtDate(r.created_at)} | score: ${r.score?.recovery_score ?? "-"}%`);
+    console.log(`  RHR: ${r.score?.resting_heart_rate ?? "-"} bpm | HRV: ${r.score?.hrv_rmssd_milli?.toFixed?.(1) ?? "-"} ms | SpO2: ${r.score?.spo2_percentage ?? "-"}%`);
+  }
+}
+
+function printStrain(records: any[]) {
+  console.log(chalk.bold("\nRecent Strain (Cycle)"));
+  for (const r of records) {
+    console.log(`• ${fmtDate(r.start)} | strain: ${r.score?.strain ?? "-"} | avg HR: ${r.score?.average_heart_rate ?? "-"} bpm | max HR: ${r.score?.max_heart_rate ?? "-"} bpm`);
+  }
+}
+
+async function main() {
+  intro("WHOOP Terminal UI");
+
+  let config = loadConfig();
+  if (!config) {
+    log.info("No config found. Running first-time setup.");
+    config = await setupConfig();
+  }
+
+  let token = loadToken();
+
+  while (true) {
+    const action = await select({
+      message: "Choose an action",
+      options: [
+        { value: "login", label: "Login / Refresh session" },
+        { value: "profile", label: "View profile" },
+        { value: "sleep", label: "View sleep data" },
+        { value: "recovery", label: "View recovery data" },
+        { value: "strain", label: "View strain (cycle) data" },
+        { value: "reconfigure", label: "Update OAuth config" },
+        { value: "logout", label: "Logout (clear local token)" },
+        { value: "exit", label: "Exit" }
+      ]
+    });
+
+    if (isCancel(action) || action === "exit") break;
+
+    try {
+      switch (action) {
+        case "login":
+          log.step("Opening browser for Whoop login...");
+          token = await loginWithBrowser(config);
+          log.success("Login successful. Token stored locally.");
+          break;
+        case "profile": {
+          if (!token) throw new Error("Not logged in. Run Login first.");
+          const profile = await whoopApi.getProfile(token, config);
+          console.log(chalk.bold("\nProfile"));
+          console.log(`• ${profile.first_name} ${profile.last_name}`);
+          console.log(`• ${profile.email}`);
+          console.log(`• user_id: ${profile.user_id}`);
+          break;
+        }
+        case "sleep": {
+          if (!token) throw new Error("Not logged in. Run Login first.");
+          const data = await whoopApi.getSleep(token, config, 7);
+          printSleep(data.records);
+          break;
+        }
+        case "recovery": {
+          if (!token) throw new Error("Not logged in. Run Login first.");
+          const data = await whoopApi.getRecovery(token, config, 7);
+          printRecovery(data.records);
+          break;
+        }
+        case "strain": {
+          if (!token) throw new Error("Not logged in. Run Login first.");
+          const data = await whoopApi.getCycles(token, config, 7);
+          printStrain(data.records);
+          break;
+        }
+        case "reconfigure":
+          config = await setupConfig();
+          log.success("Config saved.");
+          break;
+        case "logout":
+          clearToken();
+          token = null;
+          log.success("Local token removed.");
+          break;
+      }
+    } catch (err: any) {
+      log.error(err?.message ?? "Unknown error");
+    }
+  }
+
+  outro("Done.");
+}
+
+main().catch((err) => {
+  cancel(String(err?.message ?? err));
+  process.exit(1);
+});
