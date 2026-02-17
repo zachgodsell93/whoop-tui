@@ -6,6 +6,24 @@ import { whoopApi } from "./api.js";
 import { AppConfig, clearToken, loadConfig, loadToken, saveConfig } from "./config.js";
 import { fmtDate, msToHours } from "./utils.js";
 
+const BAR_WIDTH = 28;
+
+function clamp(n: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, n));
+}
+
+function bar(value: number, max: number, width = BAR_WIDTH, color: (s: string) => string = (s) => s) {
+  const safe = clamp(value, 0, max);
+  const fill = Math.round((safe / max) * width);
+  const empty = Math.max(0, width - fill);
+  return color("█".repeat(fill)) + chalk.gray("░".repeat(empty));
+}
+
+function dayLabel(iso?: string) {
+  if (!iso) return "unknown";
+  return new Date(iso).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
 async function setupConfig(): Promise<AppConfig> {
   const clientId = await text({
     message: "Whoop OAuth Client ID",
@@ -40,26 +58,47 @@ async function setupConfig(): Promise<AppConfig> {
 }
 
 function printSleep(records: any[]) {
-  console.log(chalk.bold("\nRecent Sleep"));
+  console.log(chalk.bold("\n😴 Sleep (last 14)"));
   for (const r of records) {
-    console.log(`• ${fmtDate(r.start)} → ${fmtDate(r.end)}`);
-    console.log(`  performance: ${r.score?.sleep_performance_percentage ?? "-"}% | efficiency: ${r.score?.sleep_efficiency_percentage ?? "-"}%`);
-    console.log(`  in bed: ${msToHours(r.score?.stage_summary?.total_in_bed_time_milli)} | awake: ${msToHours(r.score?.stage_summary?.total_awake_time_milli)} | disturbances: ${r.score?.stage_summary?.disturbance_count ?? "-"}`);
+    const perf = Number(r.score?.sleep_performance_percentage ?? 0);
+    const eff = Number(r.score?.sleep_efficiency_percentage ?? 0);
+    const inBedMs = Number(r.score?.stage_summary?.total_in_bed_time_milli ?? 0);
+    const inBedHours = inBedMs / 3_600_000;
+
+    console.log(chalk.cyan(`\n${dayLabel(r.start)}  ${fmtDate(r.start)} → ${fmtDate(r.end)}`));
+    console.log(`  perf  ${bar(perf, 100, BAR_WIDTH, chalk.blue)} ${String(perf).padStart(3)}%`);
+    console.log(`  eff   ${bar(eff, 100, BAR_WIDTH, chalk.green)} ${String(Math.round(eff)).padStart(3)}%`);
+    console.log(`  bed   ${bar(inBedHours, 12, BAR_WIDTH, chalk.magenta)} ${inBedHours.toFixed(1)}h`);
+    console.log(`  awake ${msToHours(r.score?.stage_summary?.total_awake_time_milli)} | disturbances: ${r.score?.stage_summary?.disturbance_count ?? "-"}`);
   }
 }
 
 function printRecovery(records: any[]) {
-  console.log(chalk.bold("\nRecent Recovery"));
+  console.log(chalk.bold("\n💚 Recovery (last 14)"));
+
+  const hrvValues = records
+    .map((r) => Number(r.score?.hrv_rmssd_milli ?? 0))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  const hrvMax = Math.max(60, ...hrvValues);
+
   for (const r of records) {
-    console.log(`• ${fmtDate(r.created_at)} | score: ${r.score?.recovery_score ?? "-"}%`);
-    console.log(`  RHR: ${r.score?.resting_heart_rate ?? "-"} bpm | HRV: ${r.score?.hrv_rmssd_milli?.toFixed?.(1) ?? "-"} ms | SpO2: ${r.score?.spo2_percentage ?? "-"}%`);
+    const rec = Number(r.score?.recovery_score ?? 0);
+    const hrv = Number(r.score?.hrv_rmssd_milli ?? 0);
+
+    console.log(chalk.cyan(`\n${dayLabel(r.created_at)}  ${fmtDate(r.created_at)}`));
+    console.log(`  rec   ${bar(rec, 100, BAR_WIDTH, chalk.green)} ${String(rec).padStart(3)}%`);
+    console.log(`  hrv   ${bar(hrv, hrvMax, BAR_WIDTH, chalk.yellow)} ${hrv ? hrv.toFixed(1) : "-"} ms`);
+    console.log(`  RHR: ${r.score?.resting_heart_rate ?? "-"} bpm | SpO2: ${r.score?.spo2_percentage ?? "-"}%`);
   }
 }
 
 function printStrain(records: any[]) {
-  console.log(chalk.bold("\nRecent Strain (Cycle)"));
+  console.log(chalk.bold("\n⚡ Strain (last 14 cycles)"));
   for (const r of records) {
-    console.log(`• ${fmtDate(r.start)} | strain: ${r.score?.strain ?? "-"} | avg HR: ${r.score?.average_heart_rate ?? "-"} bpm | max HR: ${r.score?.max_heart_rate ?? "-"} bpm`);
+    const strain = Number(r.score?.strain ?? 0);
+    console.log(chalk.cyan(`\n${dayLabel(r.start)}  ${fmtDate(r.start)}`));
+    console.log(`  strain ${bar(strain, 21, BAR_WIDTH, chalk.red)} ${strain ? strain.toFixed(1) : "-"}`);
+    console.log(`  avg HR: ${r.score?.average_heart_rate ?? "-"} bpm | max HR: ${r.score?.max_heart_rate ?? "-"} bpm`);
   }
 }
 
@@ -109,19 +148,19 @@ async function main() {
         }
         case "sleep": {
           if (!token) throw new Error("Not logged in. Run Login first.");
-          const data = await whoopApi.getSleep(token, config, 7);
+          const data = await whoopApi.getSleep(token, config, 14);
           printSleep(data.records);
           break;
         }
         case "recovery": {
           if (!token) throw new Error("Not logged in. Run Login first.");
-          const data = await whoopApi.getRecovery(token, config, 7);
+          const data = await whoopApi.getRecovery(token, config, 14);
           printRecovery(data.records);
           break;
         }
         case "strain": {
           if (!token) throw new Error("Not logged in. Run Login first.");
-          const data = await whoopApi.getCycles(token, config, 7);
+          const data = await whoopApi.getCycles(token, config, 14);
           printStrain(data.records);
           break;
         }
